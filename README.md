@@ -312,8 +312,7 @@ In a 330k user-day deployment, MENTOR generates 530 total false alerts over 18 m
 
 ---
 
-*Project MENTOR · CERT Insider Threat Dataset r4.2 · Carnegie Mellon University SEI*
-
-*Unsupervised · No label access · Production-scale · 330,452 user-days*
+*Project MENTOR · CERT Insider Threat Dataset r4.2 
+*Unsupervised · 330,452 user-days*
 
 </div>
