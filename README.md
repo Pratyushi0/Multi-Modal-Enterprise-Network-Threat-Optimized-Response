@@ -358,8 +358,8 @@ The 13-feature engineered space spans 4 telemetry domains (logon, USB, HTTP, fil
 
 ---
 
-*Project MENTOR · CERT Insider Threat Dataset r4.2 · Carnegie Mellon University SEI*
-*Unsupervised · No label access · Production-scale · 330,452 user-days*
+*Project MENTOR · CERT Insider Threat Dataset r4.2
+*Unsupervised · 330,452 user-days*
 *Recall 95.7% · 1,305 threats intercepted · Score separation 4.85×*
 
 </div>
