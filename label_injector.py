@@ -1,90 +1,134 @@
+"""
+label_injector.py
+-----------------
+Aligns ground-truth insider threat windows from answers/insiders.csv
+(inside the raw zip) onto the processed feature matrix, writing
+a labeled matrix with an `is_attacker` column.
+
+Requires:
+    data/processed/cert_processed_matrix.csv   (from aggregation_pipeline.py)
+    data/raw/dataset.zip                       (contains answers/insiders.csv)
+
+Output:
+    data/processed/cert_labeled_matrix.csv
+"""
+
 import pandas as pd
 import logging
 import zipfile
 import os
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [EXACT-LABELER] - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [EXACT-LABELER] - %(levelname)s - %(message)s",
+)
+
+INSIDERS_FILE = "answers/insiders.csv"
 
 
-def inject_precise_time_labels(zip_path, processed_matrix_path, final_output_path):
-    logging.info(f"Loading feature matrix from {processed_matrix_path}...")
+def inject_precise_time_labels(
+    zip_path: str             = "data/raw/dataset.zip",
+    processed_matrix_path: str = "data/processed/cert_processed_matrix.csv",
+    final_output_path: str    = "data/processed/cert_labeled_matrix.csv",
+) -> bool:
+    """
+    Loads the feature matrix, resets all labels to 0, then flips
+    is_attacker = 1 for every user-day that falls inside a confirmed
+    insider threat window.
+
+    Returns True on success, False on failure.
+    """
+    # ------------------------------------------------------------------
+    # 1. Load feature matrix
+    # ------------------------------------------------------------------
+    if not os.path.exists(processed_matrix_path):
+        logging.critical(f"Feature matrix not found: {processed_matrix_path}")
+        return False
+
+    logging.info(f"Loading feature matrix: {processed_matrix_path}")
     df = pd.read_csv(processed_matrix_path)
+    df["user"]   = df["user"].astype(str).str.strip()
+    df["day_dt"] = pd.to_datetime(df["day"], errors="coerce").dt.date
 
-    # Force clean column names and enforce clean strings
-    df['user'] = df['user'].astype(str).str.strip()
+    bad_days = df["day_dt"].isna().sum()
+    if bad_days:
+        logging.warning(f"Dropping {bad_days} rows with unparseable day values.")
+        df = df.dropna(subset=["day_dt"])
 
-    # FIX: Added errors='coerce' to handle any malformed day values in the feature matrix
-    df['day_dt'] = pd.to_datetime(df['day'], errors='coerce').dt.date
+    # Baseline — everyone is innocent
+    df["is_attacker"] = 0
 
-    # Drop rows where day parsing failed entirely
-    invalid_days = df['day_dt'].isna().sum()
-    if invalid_days > 0:
-        logging.warning(f"Dropped {invalid_days} rows with unparseable 'day' values from feature matrix.")
-        df = df.dropna(subset=['day_dt'])
+    # ------------------------------------------------------------------
+    # 2. Load ground-truth windows
+    # ------------------------------------------------------------------
+    if not os.path.exists(zip_path):
+        logging.critical(f"Archive not found: {zip_path}")
+        return False
 
-    # Reset target labels completely to baseline innocent (0)
-    df['is_attacker'] = 0
-
-    logging.info(f"Streaming threat answers file from archive: {zip_path}...")
+    logging.info(f"Loading insider ground-truth windows from {zip_path} …")
     try:
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            with z.open("answers/insiders.csv") as f:
-                insiders_df = pd.read_csv(f)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            with z.open(INSIDERS_FILE) as f:
+                insiders = pd.read_csv(f)
+    except Exception as exc:
+        logging.critical(f"Failed to read insider answer file: {exc}")
+        return False
 
-        insiders_df['user'] = insiders_df['user'].astype(str).str.strip()
+    insiders["user"]     = insiders["user"].astype(str).str.strip()
+    logging.info(f"Answer file columns: {list(insiders.columns)}")
 
-        logging.info(f"Answer file structural fields: {list(insiders_df.columns)}")
-        logging.info("Executing error-coerced timeline range extraction...")
+    insiders["start_dt"] = pd.to_datetime(insiders["start"], errors="coerce").dt.date
+    insiders["end_dt"]   = pd.to_datetime(insiders["end"],   errors="coerce").dt.date
 
-        # Coerce malformed date strings to NaT instead of crashing
-        insiders_df['start_dt'] = pd.to_datetime(insiders_df['start'], errors='coerce').dt.date
-        insiders_df['end_dt'] = pd.to_datetime(insiders_df['end'], errors='coerce').dt.date
+    before = len(insiders)
+    insiders = insiders.dropna(subset=["start_dt", "end_dt"])
+    dropped  = before - len(insiders)
+    if dropped:
+        logging.warning(f"Dropped {dropped} insider records with unparseable date ranges.")
+    logging.info(f"Retained {len(insiders)} verified attack windows.")
 
-        # Drop insider rows where date parsing completely failed
-        before = len(insiders_df)
-        insiders_df = insiders_df.dropna(subset=['start_dt', 'end_dt'])
-        after = len(insiders_df)
-        if before != after:
-            logging.warning(f"Dropped {before - after} insider records with unparseable date ranges.")
+    # ------------------------------------------------------------------
+    # 3. Flip labels inside confirmed attack windows
+    # ------------------------------------------------------------------
+    for _, row in insiders.iterrows():
+        mask = (
+            (df["user"]   == row["user"]) &
+            (df["day_dt"] >= row["start_dt"]) &
+            (df["day_dt"] <= row["end_dt"])
+        )
+        df.loc[mask, "is_attacker"] = 1
 
-        logging.info(f"Successfully cleaned and retained {len(insiders_df)} ground-truth timeline maps.")
+    # ------------------------------------------------------------------
+    # 4. Clean up and write
+    # ------------------------------------------------------------------
+    df = df.drop(columns=["day_dt"])
 
-        # Iterate over verified attack windows and flip target matrix flag to 1
-        for _, row in insiders_df.iterrows():
-            user_mask = df['user'] == row['user']
-            date_mask = (df['day_dt'] >= row['start_dt']) & (df['day_dt'] <= row['end_dt'])
-            df.loc[user_mask & date_mask, 'is_attacker'] = 1
+    total_rows   = len(df)
+    total_attack = int(df["is_attacker"].sum())
+    total_normal = total_rows - total_attack
+    contam_rate  = total_attack / total_rows
 
-        # Clean up temporary date-processing index before disk preservation
-        if 'day_dt' in df.columns:
-            df = df.drop(columns=['day_dt'])
+    print("\n" + "=" * 60)
+    print("          PRECISION TIME-ALIGNMENT COMPLETE")
+    print("=" * 60)
+    print(f" -> Total matrix volume:      {total_rows:,} rows")
+    print(f" -> True attack vector days:  {total_attack:,} rows")
+    print(f" -> Controlled normal days:   {total_normal:,} rows")
+    print(f" -> True contamination rate:  {contam_rate:.5f} ({contam_rate * 100:.3f}%)")
+    print("=" * 60 + "\n")
 
-        total_rows = len(df)
-        total_attacks = int(df['is_attacker'].sum())
-        total_normal = total_rows - total_attacks
-        true_contam = total_attacks / total_rows
-
-        print("\n" + "=" * 60)
-        print("          PRECISION TIME-ALIGNMENT COMPLETE")
-        print("=" * 60)
-        print(f" -> Total Matrix Volume:      {total_rows:,} rows")
-        print(f" -> True Attack Vector Days:  {total_attacks:,} rows")
-        print(f" -> Controlled Normal Days:   {total_normal:,} rows")
-        print(f" -> True Contamination Rate:  {true_contam:.5f} ({true_contam*100:.3f}%)")
-        print("=" * 60 + "\n")
-
-        os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
-        df.to_csv(final_output_path, index=False)
-        logging.info(f"Precisely labeled target tensor written to disk: {final_output_path}")
-
-    except Exception as e:
-        logging.critical(f"Label processing pipeline failed: {str(e)}")
-        raise
+    os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
+    df.to_csv(final_output_path, index=False)
+    logging.info(f"Labeled matrix written: {final_output_path}")
+    return True
 
 
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    ZIP_ARCHIVE = "data/raw/dataset.zip"
+    ZIP_ARCHIVE      = "data/raw/dataset.zip"
     PROCESSED_MATRIX = "data/processed/cert_processed_matrix.csv"
-    LABELED_OUTPUT = "data/processed/cert_labeled_matrix.csv"
+    LABELED_OUTPUT   = "data/processed/cert_labeled_matrix.csv"
 
-    inject_precise_time_labels(ZIP_ARCHIVE, PROCESSED_MATRIX, LABELED_OUTPUT)
+    ok = inject_precise_time_labels(ZIP_ARCHIVE, PROCESSED_MATRIX, LABELED_OUTPUT)
+    if not ok:
+        raise SystemExit(1)
