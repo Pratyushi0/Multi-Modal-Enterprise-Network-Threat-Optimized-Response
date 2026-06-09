@@ -1,0 +1,11 @@
+{
+  "n_estimators": 200,
+  "contam_multiplier": 2.0,
+  "risk_alpha": 0.015,
+  "ensemble_threshold": 0.40,
+  "svm_weight": 0.40,
+  "if_weight": 0.60,
+  "achieved_recall": 0.9648,
+  "achieved_precision": 0.0514,
+  "achieved_f1": 0.0976
+}
